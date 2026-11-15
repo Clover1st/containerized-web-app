@@ -1,8 +1,9 @@
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from flask import Flask, request, jsonify
 import redis
 import psycopg2
-import json
+import hashlib
 
+app = Flask(__name__)
 r = redis.Redis(host='redis', port=6379)
 
 def get_db():
@@ -20,6 +21,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             username VARCHAR(50) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -27,22 +29,65 @@ def init_db():
     cur.close()
     conn.close()
 
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        count = r.incr('visits')
+@app.route('/')
+def home():
+    count = r.incr('visits')
+    return jsonify({
+        "message": "Welcome to Clover's app",
+        "total_visits": count
+    })
+
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.get_json()
+    username = data.get('username')
+    password = hashlib.sha256(data.get('password').encode()).hexdigest()
+    
+    try:
         conn = get_db()
         cur = conn.cursor()
-        cur.execute('SELECT username, created_at FROM users')
-        users = cur.fetchall()
+        cur.execute('INSERT INTO users (username, password) VALUES (%s, %s)', 
+                   (username, password))
+        conn.commit()
         cur.close()
         conn.close()
-        
-        self.send_response(200)
-        self.end_headers()
-        response = f"Clover was here. Total visits: {count}\n\nRegistered Users:\n"
-        for user in users:
-            response += f"- {user[0]} (joined: {user[1]})\n"
-        self.wfile.write(response.encode())
+        return jsonify({"message": f"User {username} registered successfully"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
-init_db()
-HTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    username = data.get('username')
+    password = hashlib.sha256(data.get('password').encode()).hexdigest()
+    
+    try:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute('SELECT id FROM users WHERE username=%s AND password=%s', 
+                   (username, password))
+        user = cur.fetchone()
+        cur.close()
+        conn.close()
+        if user:
+            return jsonify({"message": f"Welcome back {username}!"})
+        else:
+            return jsonify({"error": "Invalid credentials"}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+@app.route('/users', methods=['GET'])
+def users():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute('SELECT username, created_at FROM users')
+    users = cur.fetchall()
+    cur.close()
+    conn.close()
+    return jsonify([{"username": u[0], "joined": str(u[1])} for u in users])
+
+with app.app_context():
+    init_db()
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
